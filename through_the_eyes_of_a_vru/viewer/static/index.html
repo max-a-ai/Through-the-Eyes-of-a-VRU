@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Through the Eyes of a VRU: Viewer</title>
+<style>
+  :root {
+    --bg: #101216; --panel: #181b21; --line: #2a2f38; --fg: #e6e8ec;
+    --dim: #8b93a1; --accent: #4cc9f0; --good: #43aa8b; --bad: #f94144;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg);
+    color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center;
+    padding: 8px 14px; background: var(--panel);
+    border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 14px; margin: 0 10px 0 0; font-weight: 600; }
+  label { color: var(--dim); display: inline-flex; gap: 6px;
+    align-items: center; }
+  select, button { background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px;
+    font: inherit; }
+  button { cursor: pointer; }
+  input[type=range] { width: 90px; }
+  .grp { display: inline-flex; gap: 8px; align-items: center; }
+  main { flex: 1; min-height: 0; display: grid;
+    grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 6px; }
+  .pane { display: grid; grid-template-rows: 5% minmax(0, 1fr) 15%;
+    min-width: 0; min-height: 0;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; overflow: hidden; }
+  .pane .bar { display: flex; justify-content: space-between; gap: 8px;
+    padding: 0 8px; overflow: hidden; border-bottom: 1px solid var(--line);
+    align-items: center; }
+  .pane .bar b { font-weight: 600; }
+  .cv { flex: 1; min-height: 0; position: relative; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+    cursor: grab; background: #0b0d10; }
+  .tbl { overflow-y: auto; padding: 4px 8px; border-top: 1px solid var(--line);
+    font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: right; padding: 1px 4px; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--dim); font-weight: 500; }
+  tr.tot td { border-top: 1px solid var(--line); font-weight: 600; }
+  .note { color: var(--dim); font-size: 12px; padding: 0 8px 6px; }
+  #cams { display: none; gap: 6px; padding: 0 6px 6px; overflow-x: auto; }
+  #cams img { height: 110px; border-radius: 4px; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+    margin-right: 4px; vertical-align: -1px; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Through the Eyes of a VRU</h1>
+  <label>Data <select id="scene"></select></label>
+  <span class="grp">
+    <button id="prev">&#9664;</button>
+    <label>Frame <select id="frame"></select></label>
+    <button id="next">&#9654;</button>
+  </span>
+  <span class="grp" title="Active agents (at least one)">
+    <label><input type="checkbox" id="ag-car" checked> Car</label>
+    <label><input type="checkbox" id="ag-bike" checked> Bike</label>
+  </span>
+  <label>Min score <input type="range" id="score" min="0" max="0.95"
+    step="0.05" value="0.1"><span id="scoreval">0.10</span></label>
+  <label>Points <select id="color">
+    <option value="height">by height</option>
+    <option value="hag">by height above floor</option>
+    <option value="agent">by agent</option></select></label>
+  <span class="grp" id="floorctl">
+    <label><input type="checkbox" id="floor" checked> Floor mesh</label>
+    <label><input type="checkbox" id="hidefloor"> Hide floor points</label>
+  </span>
+  <label><input type="checkbox" id="tpfp"> TP / FP (2 m)</label>
+  <label><input type="checkbox" id="labels"> Labels</label>
+  <button id="reset">Reset view</button>
+</header>
+<main>
+  <section class="pane" id="p0"><div class="bar"><b>Annotation</b>
+    <span id="t0" class="dim"></span></div>
+    <div class="cv"><canvas></canvas></div><div class="tbl"></div></section>
+  <section class="pane" id="p1"><div class="bar">
+    <select class="msel"></select><span></span></div>
+    <div class="cv"><canvas></canvas></div><div class="tbl"></div></section>
+  <section class="pane" id="p2"><div class="bar">
+    <select class="msel"></select><span></span></div>
+    <div class="cv"><canvas></canvas></div><div class="tbl"></div></section>
+</main>
+<div id="cams"></div>
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const CLS_COLOR = {car: "#4cc9f0", bicycle: "#f9c74f", pedestrian: "#f3722c"};
+const OTHER = "#8d99ae";
+const CLASSES = ["car", "bicycle", "pedestrian"];
+const st = {
+  scenes: [], scene: null, frame: null, points: null, data: null,
+  view: {f: 14, l: 0, s: 9},   // centre (forward, left) in metres; px per m
+  yaw: 0, panes: [], floor: null, fl: null, flKey: "", flBuf: null,
+};
+
+// ---------------------------------------------------------------- helpers
+const q = () => {
+  const ag = ["car", "bike"].filter(a => $("#ag-" + a).checked);
+  return {ag, p: new URLSearchParams({
+    scene: st.scene.id, frame: st.frame, agents: ag.join(","),
+  })};
+};
+const fmt = v => v == null ? "–" : (100 * v).toFixed(1);
+
+function heightColor(z) {
+  const t = Math.max(0, Math.min(1, (z + 2.5) / 5.5));
+  const r = 40 + 215 * t, g = 90 + 130 * Math.sin(Math.PI * t),
+        b = 255 - 200 * t;
+  return [r, g, b];
+}
+
+// ----------------------------------------------------------------- panes
+function initPane(el, idx) {
+  const cv = $("canvas", el);
+  const pane = {el, cv, ctx: cv.getContext("2d"), idx, method: ""};
+  st.panes.push(pane);
+  let drag = null;
+  cv.addEventListener("mousedown", e => {
+    drag = {x: e.clientX, y: e.clientY, f: st.view.f, l: st.view.l};
+    cv.style.cursor = "grabbing";
+  });
+  window.addEventListener("mouseup", () => {
+    drag = null; cv.style.cursor = "grab";
+  });
+  window.addEventListener("mousemove", e => {
+    if (!drag) return;
+    st.view.f = drag.f + (e.clientY - drag.y) / st.view.s;
+    st.view.l = drag.l + (e.clientX - drag.x) / st.view.s;
+    drawAll();
+  });
+  cv.addEventListener("wheel", e => {
+    e.preventDefault();
+    const r = cv.getBoundingClientRect();
+    const [bf, bl] = toWorld(pane, e.clientX - r.left, e.clientY - r.top);
+    st.view.s = Math.max(2, Math.min(80,
+      st.view.s * Math.exp(-e.deltaY * 0.0015)));
+    const [af, al] = toWorld(pane, e.clientX - r.left, e.clientY - r.top);
+    st.view.f += bf - af; st.view.l += bl - al;
+    drawAll();
+  }, {passive: false});
+  cv.addEventListener("dblclick", resetView);
+  return pane;
+}
+// car-forward frame: f = forward, l = left; centre (view.f, view.l)
+function toScreen(pane, f, l) {
+  const W = pane.cv.width, H = pane.cv.height, s = st.view.s * pane.dpr;
+  return [W / 2 - (l - st.view.l) * s, H / 2 - (f - st.view.f) * s];
+}
+function toWorld(pane, px, py) {
+  const W = pane.cv.clientWidth, H = pane.cv.clientHeight, s = st.view.s;
+  return [st.view.f - (py - H / 2) / s, st.view.l - (px - W / 2) / s];
+}
+function toFL(x, y) {          // lidar frame -> car-forward frame
+  const c = Math.cos(st.yaw), s = Math.sin(st.yaw);
+  return [x * c + y * s, -x * s + y * c];
+}
+function resetView() {
+  st.view = {f: 14, l: 0, s: Math.max(4, Math.min(12,
+    st.panes[0].cv.clientHeight / 90))};
+  drawAll();
+}
+
+function resize(pane) {
+  pane.dpr = window.devicePixelRatio || 1;
+  const w = Math.round(pane.cv.clientWidth * pane.dpr);
+  const h = Math.round(pane.cv.clientHeight * pane.dpr);
+  if (pane.cv.width !== w || pane.cv.height !== h) {
+    pane.cv.width = w; pane.cv.height = h;
+  }
+}
+
+function floorColor(zr) {
+  const t = Math.max(0, Math.min(1, (zr + 1.2) / 2.4));
+  const k = (Math.floor(zr / 0.2) & 1) ? 0.9 : 1.0;   // contour bands
+  return 0xff000000 | ((56 + 4 * t) * k << 16) | ((42 + 36 * t) * k << 8)
+    | ((30 + 40 * t) * k);
+}
+
+// transform the global floor mesh into the car-forward frame of this frame
+function prepFloor() {
+  const tf = st.data && st.data.floor;
+  if (!st.floor || !tf) { st.fl = null; return; }
+  const V = st.floor.v, n = V.length / 3, A = tf.A, b = tf.b;
+  const ref = tf.ref == null ? 0 : tf.ref;
+  const out = new Float32Array(n * 3);
+  const c = Math.cos(st.yaw), s = Math.sin(st.yaw);
+  for (let i = 0; i < n; i++) {
+    const x = V[3 * i], y = V[3 * i + 1], z = V[3 * i + 2];
+    if (Number.isNaN(z)) { out[3 * i] = NaN; continue; }
+    const px = A[0] * x + A[1] * y + A[2] * z + b[0];
+    const py = A[3] * x + A[4] * y + A[5] * z + b[1];
+    const pz = A[6] * x + A[7] * y + A[8] * z + b[2];
+    out[3 * i] = px * c + py * s;
+    out[3 * i + 1] = -px * s + py * c;
+    out[3 * i + 2] = pz - ref;
+  }
+  st.fl = out; st.flKey = "";
+}
+
+function floorLayer(pane) {
+  if (!st.fl || !$("#floor").checked) return null;
+  const W = pane.cv.width, H = pane.cv.height;
+  const v = st.view, key = [W, H, v.f, v.l, v.s, st.yaw, st.frame,
+    pane.dpr].join();
+  if (key === st.flKey && st.flBuf) return st.flBuf;
+  const buf = new Uint32Array(W * H).fill(0xff10100b);
+  const F = st.floor.f, V = st.fl, sc = v.s * pane.dpr;
+  const cx = W / 2 + v.l * sc, cy = H / 2 + v.f * sc;
+  for (let t = 0; t < F.length; t += 3) {
+    const i = F[t] * 3, j = F[t + 1] * 3, k = F[t + 2] * 3;
+    const x0 = cx - V[i + 1] * sc, y0 = cy - V[i] * sc;
+    const x1 = cx - V[j + 1] * sc, y1 = cy - V[j] * sc;
+    const x2 = cx - V[k + 1] * sc, y2 = cy - V[k] * sc;
+    const minx = Math.max(0, Math.floor(Math.min(x0, x1, x2)));
+    const maxx = Math.min(W - 1, Math.ceil(Math.max(x0, x1, x2)));
+    const miny = Math.max(0, Math.floor(Math.min(y0, y1, y2)));
+    const maxy = Math.min(H - 1, Math.ceil(Math.max(y0, y1, y2)));
+    if (minx > maxx || miny > maxy) continue;
+    const col = floorColor((V[i + 2] + V[j + 2] + V[k + 2]) / 3);
+    const d = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+    if (Math.abs(d) < 1e-9) continue;
+    for (let y = miny; y <= maxy; y++) {
+      for (let x = minx; x <= maxx; x++) {
+        const a = ((y1 - y2) * (x - x2) + (x2 - x1) * (y - y2)) / d;
+        const b = ((y2 - y0) * (x - x2) + (x0 - x2) * (y - y2)) / d;
+        if (a >= -0.05 && b >= -0.05 && a + b <= 1.05) buf[y * W + x] = col;
+      }
+    }
+  }
+  st.flBuf = buf; st.flKey = key;
+  return buf;
+}
+
+function drawPoints(pane) {
+  const {ctx, cv} = pane, W = cv.width, H = cv.height;
+  const img = ctx.createImageData(W, H);
+  const px = new Uint32Array(img.data.buffer);
+  const lay = floorLayer(pane);
+  if (lay) px.set(lay); else px.fill(0xff10100b);
+  const P = st.points, mode = $("#color").value;
+  const hide = st.floor && $("#hidefloor").checked;
+  const c = Math.cos(st.yaw), s = Math.sin(st.yaw);
+  const sc = st.view.s * pane.dpr;
+  const cx = W / 2 + st.view.l * sc, cy = H / 2 + st.view.f * sc;
+  for (let i = 0; i < P.length; i += 5) {
+    const x = P[i], y = P[i + 1], z = P[i + 2], hag = P[i + 4];
+    if (hide && Math.abs(hag) < 0.15) continue;
+    const sx = (cx - (-x * s + y * c) * sc) | 0;
+    const sy = (cy - (x * c + y * s) * sc) | 0;
+    if (sx < 0 || sy < 0 || sx >= W || sy >= H) continue;
+    let r, g, b;
+    if (mode === "agent") {
+      [r, g, b] = P[i + 3] === 1 ? [90, 170, 255] : [255, 170, 70];
+    } else if (mode === "hag") {
+      [r, g, b] = Number.isNaN(hag) ? [110, 110, 110]
+        : heightColor(-2.5 + Math.max(0, Math.min(1, hag / 3.5)) * 5.5);
+    } else { [r, g, b] = heightColor(z); }
+    const o = (sy * W + sx);
+    px[o] = 0xff000000 | (b << 16) | (g << 8) | r;
+    if (sc > 7 && sx + 1 < W && sy + 1 < H) {   // thicker when zoomed in
+      px[o + 1] = px[o]; px[o + W] = px[o]; px[o + W + 1] = px[o];
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function drawBox(pane, b, color, dashed) {
+  const {ctx} = pane, dpr = pane.dpr;
+  const hl = b.l / 2, hw = b.w / 2;
+  const cs = Math.cos(b.yaw), sn = Math.sin(b.yaw);
+  const corner = (dx, dy) => {
+    const [f, l] = toFL(b.x + dx * cs - dy * sn, b.y + dx * sn + dy * cs);
+    return toScreen(pane, f, l);
+  };
+  const pts = [corner(hl, hw), corner(hl, -hw), corner(-hl, -hw),
+               corner(-hl, hw)];
+  ctx.beginPath();
+  pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+  ctx.closePath();
+  ctx.lineWidth = 1.6 * dpr; ctx.strokeStyle = color;
+  ctx.setLineDash(dashed ? [4 * dpr, 3 * dpr] : []);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  const c = corner(0, 0), nose = corner(hl, 0);
+  ctx.beginPath(); ctx.moveTo(c[0], c[1]); ctx.lineTo(nose[0], nose[1]);
+  ctx.stroke();
+  return c;
+}
+
+function drawMarker(pane, m, name, color) {
+  if (!m) return;
+  const {ctx} = pane, dpr = pane.dpr;
+  const [f, l] = toFL(m[0], m[1]);
+  const [sx, sy] = toScreen(pane, f, l);
+  const a = m[2] - st.yaw;       // heading relative to "up"
+  ctx.save();
+  ctx.translate(sx, sy); ctx.rotate(-a);
+  ctx.fillStyle = color; ctx.strokeStyle = "#000"; ctx.lineWidth = dpr;
+  ctx.beginPath();
+  ctx.moveTo(0, -10 * dpr); ctx.lineTo(6 * dpr, 7 * dpr);
+  ctx.lineTo(-6 * dpr, 7 * dpr); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = color; ctx.font = `${11 * dpr}px system-ui`;
+  ctx.fillText(name, sx + 9 * dpr, sy + 4 * dpr);
+}
+
+function boxColor(b, isDet) {
+  if (isDet && $("#tpfp").checked && b.tp !== null) {
+    return b.tp ? "#43aa8b" : "#f94144";
+  }
+  return b.cls ? CLS_COLOR[b.cls] : OTHER;
+}
+
+function drawPane(pane) {
+  resize(pane);
+  if (!st.points || !st.data) return;
+  drawPoints(pane);
+  const {ctx} = pane, d = st.data, isDet = pane.idx > 0;
+  const boxes = isDet ? (pane.method && d.methods[pane.method]
+    ? d.methods[pane.method].boxes : []) : d.gt;
+  for (const b of boxes) {
+    const c = drawBox(pane, b, boxColor(b, isDet), !b.cls);
+    if ($("#labels").checked) {
+      ctx.fillStyle = "#e6e8ec"; ctx.font = `${10 * pane.dpr}px system-ui`;
+      const t = b.score != null
+        ? `${b.cls || b.cat} ${b.score.toFixed(2)}${b.agent ? " " + b.agent
+          : ""}` : (b.cat.split(".").pop());
+      ctx.fillText(t, c[0] + 4, c[1] - 4);
+    }
+  }
+  drawMarker(pane, d.markers.car, "car", "#4cc9f0");
+  drawMarker(pane, d.markers.bike, "bike", "#ffb347");
+}
+const drawAll = () => st.panes.forEach(drawPane);
+
+// ---------------------------------------------------------------- tables
+function table(pane) {
+  const box = $(".tbl", pane.el), d = st.data;
+  if (!d) { box.innerHTML = ""; return; }
+  if (pane.idx === 0) {
+    const rows = CLASSES.map(c => `<tr><td><span class="sw"
+      style="background:${CLS_COLOR[c]}"></span>${c}</td>
+      <td>${d.gt_counts[c]}</td></tr>`).join("");
+    const other = d.gt.filter(b => !b.cls).length;
+    box.innerHTML = `<table><tr><th>GT class (this frame)</th>
+      <th>boxes</th></tr>${rows}
+      <tr class="tot"><td>other (not evaluated)</td><td>${other}</td></tr>
+      </table>`;
+    return;
+  }
+  const m = pane.method && d.methods[pane.method];
+  if (!m) { box.innerHTML = ""; return; }
+  const rows = CLASSES.map(c => {
+    const f = m.frame.classes[c], s = m.scene.classes[c];
+    return `<tr><td><span class="sw" style="background:${CLS_COLOR[c]}">
+      </span>${c}</td><td>${f.n_gt}/${f.n_pred}</td><td>${fmt(f.ap)}</td>
+      <td>${s.n_gt}/${s.n_pred}</td><td>${fmt(s.ap)}</td></tr>`;
+  }).join("");
+  box.innerHTML = `<table><tr><th></th><th colspan="2">this frame</th>
+    <th colspan="2">scene (${d.n_frames} frames)</th></tr>
+    <tr><th>class</th><th>GT/det</th><th>AP</th><th>GT/det</th><th>AP</th></tr>
+    ${rows}<tr class="tot"><td>mAP</td><td></td><td>${fmt(m.frame.m_ap)}</td>
+    <td></td><td>${fmt(m.scene.m_ap)}</td></tr></table>
+    <div class="note" style="padding:4px 0 0">AP in %, centre-distance
+    0.5/1/2/4 m, score &ge; ${$("#score").value}.
+    ${st.agentsBoth ? "Both agents: duplicates merged (1 m NMS)." : ""}</div>`;
+}
+
+// --------------------------------------------------------------- loading
+let token = 0;
+async function load() {
+  const my = ++token, {ag, p} = q();
+  if (!ag.length) return;
+  st.agentsBoth = ag.length > 1;
+  const methods = [...new Set(st.panes.slice(1).map(x => x.method)
+    .filter(Boolean))];
+  const fp = new URLSearchParams(p);
+  fp.set("methods", methods.join(","));
+  fp.set("min_score", $("#score").value);
+  const [pts, data] = await Promise.all([
+    fetch("/api/points?" + p).then(r => r.arrayBuffer()),
+    fetch("/api/frame?" + fp).then(r => r.json()),
+  ]);
+  if (my !== token) return;
+  st.points = new Float32Array(pts); st.data = data;
+  const car = data.markers.car;
+  if (car) st.yaw = car[2];
+  prepFloor();
+  st.panes.forEach(table); drawAll();
+  loadCams();
+}
+
+function loadCams() {
+  const el = $("#cams"), cams = st.scene.cameras;
+  el.style.display = cams.length ? "flex" : "none";
+  el.innerHTML = cams.map(c =>
+    `<img alt="${c}" loading="lazy" onerror="this.remove()"
+      src="/api/image?scene=${st.scene.id}&frame=${st.frame}&cam=${c}">`
+  ).join("");
+}
+
+async function loadFloor() {
+  st.floor = null; st.fl = null;
+  const has = !!st.scene.floor;
+  $("#floorctl").style.display = has ? "" : "none";
+  if (!has) {
+    if ($("#color").value === "hag") $("#color").value = "height";
+    return;
+  }
+  const id = st.scene.id;
+  const [v, f] = await Promise.all(["verts", "faces"].map(part =>
+    fetch(`/api/floor?scene=${id}&part=${part}`).then(r => r.arrayBuffer())));
+  if (st.scene.id !== id) return;
+  st.floor = {v: new Float32Array(v), f: new Uint32Array(f)};
+  prepFloor(); drawAll();
+}
+
+function setScene(id) {
+  st.scene = st.scenes.find(s => s.id === id);
+  loadFloor();
+  $("#frame").innerHTML = st.scene.frames.map(f =>
+    `<option value="${f.index}">#${f.index} · ${f.time.toFixed(1)} s</option>`
+  ).join("");
+  st.frame = st.scene.frames[0].index;
+  const opts = '<option value="">– no method –</option>' +
+    st.scene.methods.map(m => `<option value="${m.id}">${m.name}</option>`)
+      .join("");
+  st.panes.slice(1).forEach((p, i) => {
+    const sel = $(".msel", p.el);
+    sel.innerHTML = opts;
+    p.method = st.scene.methods[i] ? st.scene.methods[i].id : "";
+    sel.value = p.method;
+  });
+}
+
+function step(d) {
+  const fr = st.scene.frames.map(f => f.index);
+  const i = Math.max(0, Math.min(fr.length - 1, fr.indexOf(st.frame) + d));
+  st.frame = fr[i]; $("#frame").value = st.frame; load();
+}
+
+async function main() {
+  st.scenes = await (await fetch("/api/scenes")).json();
+  if (!st.scenes.length) {
+    document.body.insertAdjacentHTML("beforeend",
+      "<p style='padding:20px'>No scene found under samples/.</p>");
+    return;
+  }
+  $("#scene").innerHTML = st.scenes.map(s =>
+    `<option>${s.id}</option>`).join("");
+  document.querySelectorAll(".pane").forEach((el, i) => initPane(el, i));
+  setScene(st.scenes[0].id);
+  $("#scene").onchange = e => { setScene(e.target.value); load(); };
+  $("#frame").onchange = e => { st.frame = +e.target.value; load(); };
+  $("#prev").onclick = () => step(-1);
+  $("#next").onclick = () => step(1);
+  $("#reset").onclick = resetView;
+  for (const a of ["car", "bike"]) {
+    $("#ag-" + a).onchange = e => {
+      if (!$("#ag-car").checked && !$("#ag-bike").checked) {
+        e.target.checked = true;   // at least one agent stays active
+        return;
+      }
+      load();
+    };
+  }
+  let t = null;
+  $("#score").oninput = e => {
+    $("#scoreval").textContent = (+e.target.value).toFixed(2);
+    clearTimeout(t); t = setTimeout(load, 120);
+  };
+  $("#color").onchange = drawAll;
+  $("#floor").onchange = drawAll;
+  $("#hidefloor").onchange = drawAll;
+  $("#tpfp").onchange = drawAll;
+  $("#labels").onchange = drawAll;
+  st.panes.slice(1).forEach(p => {
+    $(".msel", p.el).onchange = e => { p.method = e.target.value; load(); };
+  });
+  window.addEventListener("resize", drawAll);
+  window.addEventListener("keydown", e => {
+    if (e.target.tagName === "SELECT") return;
+    if (e.key === "ArrowRight") step(1);
+    if (e.key === "ArrowLeft") step(-1);
+  });
+  st.panes.forEach(resize);
+  resetView();
+  load();
+}
+main();
+</script>
+</body>
+</html>

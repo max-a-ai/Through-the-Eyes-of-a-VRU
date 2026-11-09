@@ -1,0 +1,32 @@
+# UV / Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Type checker / lint caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Machine-dependent, never committed (built by <module>/scripts/dm_link.py)
+/resources/
+/outputs/
+
+# Executed notebook copies
+/notebooks/*.executed.ipynb
+
+# NOTE: .docs/ is deliberately NOT ignored -- it is the record of
+# the work (progress.md, figures, latex-draft, promoted runs).
+
+# Experiment tracking caches
+wandb/
+
+# OS
+.DS_Store

@@ -1,0 +1,62 @@
+[project]
+name = "through-the-eyes-of-a-vru"
+version = "0.1.0"
+description = "Cooperative perception from a sensor-equipped bicycle: dataset and method viewer."
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "flask>=3.1.3",
+    "numpy>=2.5.4",
+]
+
+[project.scripts]
+through-the-eyes-of-a-vru = "through_the_eyes_of_a_vru.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["through_the_eyes_of_a_vru"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "mypy>=1.11",
+    "pytest>=8",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.ruff]
+line-length = 79
+target-version = "py313"
+src = ["."]
+# notebooks/ipynb-assets/*.py stays linted: it is real code.
+extend-exclude = ["third_party", "notebooks/*.ipynb", "resources", "outputs"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+    "RET",
+    "N",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["through_the_eyes_of_a_vru", "tests"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
